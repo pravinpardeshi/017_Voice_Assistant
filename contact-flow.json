@@ -1,0 +1,128 @@
+{
+  "Version": "2019-10-30",
+  "StartAction": "561ff85a-33d9-4c2e-b4c7-36319e8599d4",
+  "Metadata": {
+    "entryPointPosition": { "x": 15, "y": 15 },
+    "snapToGrid": false,
+    "ActionMetadata": {
+      "561ff85a-33d9-4c2e-b4c7-36319e8599d4": { "position": { "x": 172, "y": 16 } },
+      "77d534d8-e591-4a15-a275-6e951e6a6479": { "position": { "x": 172, "y": 140 } },
+      "14156687-d787-4c1e-974f-41e9e6a2f038": { "position": { "x": 172, "y": 264 } },
+      "671d0e16-0249-4ef1-a4f0-09e20512c787": { "position": { "x": 172, "y": 388 } },
+      "5c932c92-6a49-46b9-9faa-e8738d0dfd32": { "position": { "x": 172, "y": 512 } },
+      "9cc9e431-09b7-4a61-a865-05cf2c718299": { "position": { "x": 80, "y": 660 } },
+      "360121b9-9d80-4c2f-a344-3568e4fc807f": { "position": { "x": 330, "y": 660 } },
+      "258c1ce1-1c2a-40f5-85d0-6c0de2603329": { "position": { "x": 205, "y": 800 } }
+    }
+  },
+  "Actions": [
+    {
+      "Identifier": "561ff85a-33d9-4c2e-b4c7-36319e8599d4",
+      "Type": "UpdateFlowLoggingBehavior",
+      "Parameters": { "FlowLoggingBehavior": "Enabled" },
+      "Transitions": {
+        "NextAction": "77d534d8-e591-4a15-a275-6e951e6a6479",
+        "Errors": [],
+        "Conditions": []
+      }
+    },
+    {
+      "Identifier": "77d534d8-e591-4a15-a275-6e951e6a6479",
+      "Type": "UpdateContactTextToSpeechVoice",
+      "Parameters": { "TextToSpeechVoice": "Tiffany" },
+      "Transitions": {
+        "NextAction": "14156687-d787-4c1e-974f-41e9e6a2f038",
+        "Errors": [],
+        "Conditions": []
+      }
+    },
+    {
+      "Identifier": "14156687-d787-4c1e-974f-41e9e6a2f038",
+      "Type": "UpdateContactAttributes",
+      "Parameters": { "Attributes": { "contactNumber": "$.CustomerEndpoint.Address" } },
+      "Transitions": {
+        "NextAction": "671d0e16-0249-4ef1-a4f0-09e20512c787",
+        "Errors": [
+          {
+            "NextAction": "360121b9-9d80-4c2f-a344-3568e4fc807f",
+            "ErrorType": "NoMatchingError"
+          }
+        ],
+        "Conditions": []
+      }
+    },
+    {
+      "Identifier": "671d0e16-0249-4ef1-a4f0-09e20512c787",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "Hello, and thank you for calling iFirm. I am Monica and will collect a few quick details to get you started."
+      },
+      "Transitions": {
+        "NextAction": "5c932c92-6a49-46b9-9faa-e8738d0dfd32",
+        "Errors": [],
+        "Conditions": []
+      }
+    },
+    {
+      "Identifier": "5c932c92-6a49-46b9-9faa-e8738d0dfd32",
+      "Type": "ConnectParticipantWithLexBot",
+      "Parameters": {
+        "Text": "I will ask some questions to gather basic information. Is that okay?",
+        "LexV2Bot": {
+          "AliasArn": "arn:aws:lex:ca-central-1:123456789012:bot-alias/AAAAAAAAAA/BBBBBBBBBB"
+        },
+        "LexSessionAttributes": {
+          "contactNumber": "$.Attributes.contactNumber"
+        }
+      },
+      "Transitions": {
+        "NextAction": "9cc9e431-09b7-4a61-a865-05cf2c718299",
+        "Errors": [
+          {
+            "NextAction": "360121b9-9d80-4c2f-a344-3568e4fc807f",
+            "ErrorType": "NoMatchingError"
+          },
+          {
+            "NextAction": "360121b9-9d80-4c2f-a344-3568e4fc807f",
+            "ErrorType": "NoMatchingCondition"
+          },
+          {
+            "NextAction": "360121b9-9d80-4c2f-a344-3568e4fc807f",
+            "ErrorType": "InputTimeLimitExceeded"
+          }
+        ],
+        "Conditions": []
+      }
+    },
+    {
+      "Identifier": "9cc9e431-09b7-4a61-a865-05cf2c718299",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "Thank you. Someone from iFirm will reach out to you. Have a nice day."
+      },
+      "Transitions": {
+        "NextAction": "258c1ce1-1c2a-40f5-85d0-6c0de2603329",
+        "Errors": [],
+        "Conditions": []
+      }
+    },
+    {
+      "Identifier": "360121b9-9d80-4c2f-a344-3568e4fc807f",
+      "Type": "MessageParticipant",
+      "Parameters": {
+        "Text": "Sorry, something went wrong. Please call us back in a few minutes so we can help you. Goodbye."
+      },
+      "Transitions": {
+        "NextAction": "258c1ce1-1c2a-40f5-85d0-6c0de2603329",
+        "Errors": [],
+        "Conditions": []
+      }
+    },
+    {
+      "Identifier": "258c1ce1-1c2a-40f5-85d0-6c0de2603329",
+      "Type": "DisconnectParticipant",
+      "Parameters": {},
+      "Transitions": {}
+    }
+  ]
+}

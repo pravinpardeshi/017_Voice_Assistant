@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Caller Intake Records</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #f5f7fa; color: #333; }
+        .header { background: #232f3e; color: #fff; padding: 16px 24px; }
+        .header h1 { font-size: 20px; font-weight: 600; }
+        .header .subtitle { font-size: 13px; color: #aab7c4; margin-top: 4px; }
+        .container { max-width: 1100px; margin: 24px auto; padding: 0 16px; }
+        .toolbar { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
+        .search-form { display: flex; gap: 8px; flex: 1; min-width: 280px; }
+        .search-form input { flex: 1; padding: 10px 14px; border: 1px solid #d5dbdb; border-radius: 6px; font-size: 14px; }
+        .search-form input:focus { outline: none; border-color: #ff9900; box-shadow: 0 0 0 2px #ff990044; }
+        .btn { padding: 10px 18px; border: none; border-radius: 6px; font-size: 14px; cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px; }
+        .btn-primary { background: #ff9900; color: #fff; font-weight: 600; }
+        .btn-primary:hover { background: #e68a00; }
+        .btn-secondary { background: #fff; color: #333; border: 1px solid #d5dbdb; }
+        .btn-secondary:hover { background: #f0f0f0; }
+        .stats { font-size: 13px; color: #666; margin-left: auto; }
+        table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.08); }
+        th { background: #eaeded; text-align: left; padding: 12px 14px; font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; color: #555; font-weight: 600; }
+        td { padding: 12px 14px; border-top: 1px solid #eee; font-size: 14px; }
+        tr:hover { background: #fef8f0; }
+        .tag { display: inline-block; background: #e8f4f8; color: #0073bb; padding: 2px 8px; border-radius: 4px; font-size: 12px; }
+        .no-results { text-align: center; padding: 60px 20px; color: #888; }
+        .no-results h2 { font-size: 18px; margin-bottom: 8px; }
+        a { color: #0073bb; text-decoration: none; }
+        a:hover { text-decoration: underline; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Amazon Connect Caller Intake Records</h1>
+        <div class="subtitle">S3 bucket: {{ bucket }} &middot; calls/year/month/day/</div>
+    </div>
+    <div class="container">
+        <div class="toolbar">
+            <form class="search-form" method="get" action="/">
+                <input type="text" name="q" value="{{ query }}" placeholder="Search by name, email, reason, date, phone...">
+                <button type="submit" class="btn btn-primary">Search</button>
+                {% if query %}
+                <a href="/" class="btn btn-secondary">Clear</a>
+                {% endif %}
+            </form>
+            <span class="stats">{{ total }} record{{ 's' if total != 1 }}</span>
+            <a href="/download-all" class="btn btn-secondary">Download All</a>
+        </div>
+
+        {% if records %}
+        <table>
+            <thead>
+                <tr>
+                    <th>Date</th>
+                    <th>Time</th>
+                    <th>Name</th>
+                    <th>Email</th>
+                    <th>Callback #</th>
+                    <th>Reason</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for r in records %}
+                <tr>
+                    <td>{{ r.date or '-' }}</td>
+                    <td>{{ r.time or '-' }}</td>
+                    <td><strong>{{ r.fullName or (r.firstName ~ ' ' ~ r.lastName) }}</strong></td>
+                    <td>{{ r.email or '-' }}</td>
+                    <td>{{ r.callbackNumber or '-' }}</td>
+                    <td>{{ (r.reasonForCalling[:60] ~ '...') if r.reasonForCalling and r.reasonForCalling|length > 60 else (r.reasonForCalling or '-') }}</td>
+                    <td>
+                        <a href="/record/{{ r._s3_key }}" class="btn btn-secondary" style="padding:6px 12px;font-size:12px;">View</a>
+                        <a href="/download/{{ r._s3_key }}" class="btn btn-secondary" style="padding:6px 12px;font-size:12px;">Download</a>
+                    </td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% else %}
+        <div class="no-results">
+            <h2>No records found</h2>
+            {% if query %}
+            <p>No results for "<strong>{{ query }}</strong>". Try a different search.</p>
+            {% else %}
+            <p>No caller intake records in S3 yet.</p>
+            {% endif %}
+        </div>
+        {% endif %}
+    </div>
+</body>
+</html>

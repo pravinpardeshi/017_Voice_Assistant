@@ -3,7 +3,7 @@ import os
 import re
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 
 import boto3
@@ -139,8 +139,217 @@ def slot_value(slots, name):
     return None
 
 
-def save_record(event, intent, attrs):
-    """Persist the confirmed caller record to S3. Same schema as s3_saver.py."""
+# ─── Appointment booking (Google Calendar) ──────────────────────────
+
+def _tz():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo(config.TIMEZONE)
+    except Exception as e:
+        print(f"WARNING: timezone {config.TIMEZONE} unavailable ({e}) — booking unchecked")
+        return None
+
+
+def _google_calendar():
+    """Lazy Calendar client from the service-account key JSON stored in S3."""
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+    except ImportError as e:
+        print(f"WARNING: google client libs missing ({e}) — booking unchecked")
+        return None
+    try:
+        if not config.CALENDAR_ID:
+            print("WARNING: CALENDAR_ID is empty — booking unchecked")
+            return None
+        obj = s3.get_object(Bucket=config.S3_BUCKET, Key=config.GOOGLE_CREDENTIALS_KEY)
+        info = json.loads(obj["Body"].read())
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/calendar"])
+        return build("calendar", "v3", credentials=creds, cache_discovery=False)
+    except Exception as e:
+        print(f"WARNING: Google Calendar unavailable ({e}) — booking unchecked")
+        return None
+
+
+def _parse_appt_date(value, tz):
+    """YYYY-MM-DD within [today, today+lookahead] or None."""
+    if not value or not re.match(r"^\d{4}-\d{2}-\d{2}$", value.strip()):
+        return None
+    try:
+        day = datetime.strptime(value.strip(), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    today = datetime.now(tz).date()
+    if day < today or (day - today).days > config.APPT_LOOKAHEAD_DAYS:
+        return None
+    return day
+
+
+def _parse_appt_time(value):
+    """HH:MM (24h) or None (vague MO/AF/EV/NI codes need a specific time)."""
+    if not value:
+        return None
+    if value.strip().upper() in config.VAGUE_TIMES:
+        return None
+    m = re.match(r"^(\d{1,2}):(\d{2})(?::\d{2})?$", value.strip())
+    if not m:
+        return None
+    h, mi = int(m.group(1)), int(m.group(2))
+    if not (0 <= h <= 23 and 0 <= mi <= 59):
+        return None
+    return (h, mi)
+
+
+def _in_business_hours(start, duration_min):
+    if start.weekday() >= 5:
+        return False
+    end = start + timedelta(minutes=duration_min)
+    if end.date() != start.date():
+        return False
+    return ((start.hour, start.minute) >= (config.BUSINESS_HOURS_START, 0)
+            and (end.hour, end.minute) <= (config.BUSINESS_HOURS_END, 0))
+
+
+def _busy_intervals(service, day_start, window_end):
+    try:
+        resp = service.freebusy().query(body={
+            "timeMin": day_start.isoformat(), "timeMax": window_end.isoformat(),
+            "timeZone": config.TIMEZONE,
+            "items": [{"id": config.CALENDAR_ID}]}).execute()
+        return [(b["start"], b["end"]) for b in
+                resp.get("calendars", {}).get(config.CALENDAR_ID, {}).get("busy", [])]
+    except Exception as e:
+        print(f"WARNING: freebusy query failed ({e})")
+        return None
+
+
+def _overlaps(start, end, busy):
+    for bs, be in busy:
+        try:
+            bs_dt = datetime.fromisoformat(bs)
+            be_dt = datetime.fromisoformat(be)
+        except ValueError:
+            continue
+        if start < be_dt and bs_dt < end:
+            return True
+    return False
+
+
+def _ceil_step(dt, step_min):
+    step = step_min * 60
+    ts = dt.timestamp()
+    return datetime.fromtimestamp(ts + (-ts % step), tz=dt.tzinfo)
+
+
+def find_appt_slot(service, day, h, mi, tz):
+    """(start, end, adjusted, checked) for the requested day/time.
+
+    Returns the request itself when free and in business hours, else the next
+    free in-hours slot (15-min grid). checked=False means the calendar could
+    not be read — caller should proceed unchecked, not block.
+    """
+    dur = config.APPT_DURATION_MIN
+    now = datetime.now(tz)
+    req = _ceil_step(datetime(day.year, day.month, day.day, h, mi, tzinfo=tz),
+                     config.APPT_STEP_MIN)
+    if req < now + timedelta(minutes=5):
+        req = _ceil_step(now + timedelta(minutes=5), config.APPT_STEP_MIN)
+    window_end = now + timedelta(days=config.APPT_SEARCH_DAYS)
+    day_start = datetime.combine(day, datetime.min.time()).replace(tzinfo=tz)
+    busy = _busy_intervals(service, day_start, window_end)
+    if busy is None:
+        return (None, None, False, False)
+    cand = req
+    for _ in range(2000):
+        if cand > window_end:
+            return (None, None, False, True)
+        end = cand + timedelta(minutes=dur)
+        if _in_business_hours(cand, dur) and not _overlaps(cand, end, busy):
+            return (cand, end, cand != req, True)
+        cand += timedelta(minutes=config.APPT_STEP_MIN)
+    return (None, None, False, True)
+
+
+def pretty_appt(dt):
+    h12 = int(dt.strftime("%I"))
+    return f"{dt.strftime('%A')}, {dt.strftime('%B')} {dt.day} at {h12}:{dt.strftime('%M')} {dt.strftime('%p')}"
+
+
+def _norm_affirm(text):
+    return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", (text or "").strip().lower()))
+
+
+def is_affirmative(text):
+    t = _norm_affirm(text)
+    return t in config.YES_ANSWERS or t in config.APPT_ACCEPT_EXTRA
+
+
+def book_appt(service, start, end, first, last, email, callback, reason, contact_id):
+    body = {
+        "summary": f"Call with {first} {last} — iFirm intake",
+        "description": ("Booked by voice agent.\n"
+                        f"Name: {first} {last}\nEmail: {email}\n"
+                        f"Callback: {callback}\nReason: {reason}\n"
+                        f"Contact: {contact_id}"),
+        "start": {"dateTime": start.isoformat(), "timeZone": config.TIMEZONE},
+        "end": {"dateTime": end.isoformat(), "timeZone": config.TIMEZONE},
+    }
+    ev = service.events().insert(calendarId=config.CALENDAR_ID, body=body).execute()
+    return ev.get("id"), ev.get("htmlLink")
+
+
+def _resolve_fulfillment_appt(event, intent, attrs):
+    """Fresh availability check + booking. Never raises: returns status dict."""
+    appt = {"requested": None, "start": None, "end": None,
+            "status": "unchecked", "eventId": None, "eventLink": None}
+    slots = intent.get("slots") or {}
+    tz = _tz()
+    day_s = slot_value(slots, config.SLOT_APPT_DATE)
+    time_s = slot_value(slots, config.SLOT_APPT_TIME)
+    if tz is None or not day_s:
+        return appt
+    day = _parse_appt_date(day_s, tz)
+    parsed = _parse_appt_time(time_s) if time_s else None
+    if day is None or parsed is None:
+        return appt
+    req = datetime(day.year, day.month, day.day, parsed[0], parsed[1], tzinfo=tz)
+    requested_iso = attrs.get("apptRequested") or req.isoformat()
+    appt["requested"] = requested_iso
+    service = _google_calendar() if config.CALENDAR_ID else None
+    if service is None:
+        appt["start"] = req.isoformat()
+        appt["end"] = (req + timedelta(minutes=config.APPT_DURATION_MIN)).isoformat()
+        return appt
+    start, end, adjusted, checked = find_appt_slot(service, day, parsed[0], parsed[1], tz)
+    if not checked or start is None:
+        appt["start"] = req.isoformat()
+        appt["end"] = (req + timedelta(minutes=config.APPT_DURATION_MIN)).isoformat()
+        appt["status"] = "no_availability" if checked else "unchecked"
+        return appt
+    try:
+        eid, link = book_appt(
+            service, start, end,
+            slot_value(slots, config.SLOT_FIRST_NAME) or "unknown",
+            slot_value(slots, config.SLOT_LAST_NAME) or "unknown",
+            slot_value(slots, config.SLOT_EMAIL),
+            slot_value(slots, config.SLOT_CALLBACK_NUMBER),
+            slot_value(slots, config.SLOT_REASON),
+            (event.get("requestAttributes") or {}).get("contactId", "unknown"),
+        )
+    except Exception as e:
+        print(f"ERROR: booking failed ({e}) — saving flagged record")
+        appt.update(start=start.isoformat(), end=end.isoformat(), status="booking_failed")
+        return appt
+    appt.update(start=start.isoformat(), end=end.isoformat(),
+                status="adjusted" if requested_iso != start.isoformat() else "booked",
+                eventId=eid, eventLink=link)
+    return appt
+
+
+def save_record(event, intent, attrs, appt=None):
+    """Persist the confirmed caller record to S3. Same schema as s3_saver.py,
+    plus appointment fields (all None when booking is unchecked)."""
     slots = intent.get("slots") or {}
     first = slot_value(slots, config.SLOT_FIRST_NAME) or "unknown"
     last = slot_value(slots, config.SLOT_LAST_NAME) or "unknown"
@@ -149,6 +358,7 @@ def save_record(event, intent, attrs):
     reason = slot_value(slots, config.SLOT_REASON)
     ani = (attrs or {}).get("contactNumber", "unknown")
     contact_id = (event.get("requestAttributes") or {}).get("contactId", "unknown")
+    appt = appt or {}
 
     now = datetime.now(timezone.utc)
     record_id = str(uuid.uuid4())[:config.S3_RECORD_ID_LEN]
@@ -169,6 +379,12 @@ def save_record(event, intent, attrs):
         "email": email,
         "callbackNumber": callback,
         "reasonForCalling": reason,
+        "appointmentRequested": appt.get("requested"),
+        "appointmentStart": appt.get("start"),
+        "appointmentEnd": appt.get("end"),
+        "appointmentStatus": appt.get("status", "unchecked"),
+        "calendarEventId": appt.get("eventId"),
+        "calendarEventLink": appt.get("eventLink"),
     }
 
     print(f"Saving record for {first} {last} to bucket {config.S3_BUCKET} (contact {contact_id})")
@@ -215,7 +431,7 @@ def send_record_email(record, filename):
     caller = (record.get("email") or "").strip()
     caller_ok = _valid_email(caller) and config.NOTIFICATION_CALLER_ENABLED
     if _valid_email(caller) and not config.NOTIFICATION_CALLER_ENABLED:
-        print("Caller receipt disabled by NOTIFICATION_CALLER_ENABLED — skipping caller email") and config.NOTIFICATION_CALLER_ENABLED
+        print("Caller receipt disabled — skipping caller email")
     if not caller_ok and not admins:
         print("Email notifications enabled but no valid recipient "
               "(caller email invalid, no admin emails) — skipping")
@@ -241,7 +457,8 @@ def send_record_email(record, filename):
                 f"Name: {record.get('fullName')}\n"
                 f"Email: {record.get('email')}\n"
                 f"Callback: {record.get('callbackNumber')}\n"
-                f"Reason: {record.get('reasonForCalling')}\n",
+                f"Reason: {record.get('reasonForCalling')}\n"
+                f"Appointment: {record.get('appointmentStart')} ({record.get('appointmentStatus')})\n",
                 record, filename,
             )
             print(f"Sent caller receipt to {caller}: {mid}")
@@ -258,7 +475,12 @@ def send_record_email(record, filename):
                 f"Callback: {record.get('callbackNumber')} "
                 f"(calling number: {record.get('callingNumber')})\n"
                 f"Reason: {record.get('reasonForCalling')}\n"
-                f"Timestamp (UTC): {record.get('timestamp')}\n"
+                f"Appointment: {record.get('appointmentStart')} "
+                f"({record.get('appointmentStatus')})"
+                + (f"\nEvent: {record.get('calendarEventLink')}" if record.get("calendarEventLink") else "")
+                + (f"\nNOTE: booking {record.get('appointmentStatus')} — follow up manually."
+                   if record.get("appointmentStatus") in ("booking_failed", "unchecked", "no_availability") else "")
+                + f"\nTimestamp (UTC): {record.get('timestamp')}\n"
                 f"S3 key: {config.S3_PREFIX}{filename}\n",
                 record, filename,
             )
@@ -285,11 +507,13 @@ def lambda_handler(event, ctx):
             for k in list(intent["slots"].keys()):
                 intent["slots"][k] = None
             intent["confirmationState"] = "None"
+            for k in ("apptStart", "apptEnd", "apptRequested", "pendingSuggestion"):
+                attrs.pop(k, None)
             return elicit(event, config.SLOT_FIRST_NAME, config.PROMPT_DECLINE)
-        # Confirmed: Lex routes fulfillment to this same Lambda (one code hook
-        # per alias), so persist the record here before closing.
+        # Confirmed: re-resolve the appointment fresh, book it, persist, email.
+        appt = _resolve_fulfillment_appt(event, intent, attrs)
         try:
-            record, filename = save_record(event, intent, attrs)
+            record, filename = save_record(event, intent, attrs, appt)
         except Exception:
             print("ERROR: failed to save record to S3")
             raise
@@ -343,4 +567,89 @@ def lambda_handler(event, ctx):
     if reason and (len(reason.strip()) < config.MIN_REASON_LEN or is_filler(reason)):
         set_slot(intent, config.SLOT_REASON, None)
         return elicit(event, config.SLOT_REASON, config.PROMPT_MIN_REASON)
-    return delegate(event)
+
+    # Appointment scheduling runs only once contact details + reason are in.
+    if not all([first, last, email, isbest, cb, reason]):
+        return delegate(event)
+    tz = _tz()
+    if tz is None:
+        return delegate(event)
+    appt_date = get_slot(intent, config.SLOT_APPT_DATE)
+    appt_time = get_slot(intent, config.SLOT_APPT_TIME)
+    transcript = event.get("inputTranscript", "") or ""
+
+    if not appt_date:
+        return elicit(event, config.SLOT_APPT_DATE, config.PROMPT_APPT_DATE)
+    day = _parse_appt_date(appt_date, tz)
+    if day is None:
+        set_slot(intent, config.SLOT_APPT_DATE, None)
+        return elicit(event, config.SLOT_APPT_DATE, config.PROMPT_APPT_DATE_INVALID)
+
+    pending_iso = attrs.get("pendingSuggestion")
+    if pending_iso and appt_time:
+        attrs.pop("pendingSuggestion", None)
+        pending_iso = None
+    if pending_iso and not appt_time:
+        # Caller answering the suggestion offer.
+        if is_affirmative(transcript):
+            try:
+                sug = datetime.fromisoformat(pending_iso)
+            except ValueError:
+                sug = None
+            if sug is not None:
+                set_slot(intent, config.SLOT_APPT_TIME, f"{sug.hour:02d}:{sug.minute:02d}")
+                attrs["apptStart"] = sug.isoformat()
+                attrs["apptEnd"] = (sug + timedelta(minutes=config.APPT_DURATION_MIN)).isoformat()
+                attrs.pop("pendingSuggestion", None)
+                return delegate(event)
+        elif _norm_affirm(transcript) in config.NO_ANSWERS:
+            attrs.pop("pendingSuggestion", None)
+            return elicit(event, config.SLOT_APPT_TIME, config.PROMPT_APPT_TIME)
+        # Anything else: fall through and re-offer below.
+
+    if not appt_time:
+        if pending_iso:
+            try:
+                sug = datetime.fromisoformat(pending_iso)
+            except ValueError:
+                sug = None
+            if sug is not None:
+                return elicit(event, config.SLOT_APPT_TIME,
+                    f"The next opening is {pretty_appt(sug)}. Does that work for you? Say yes, or suggest another time.")
+        return elicit(event, config.SLOT_APPT_TIME, config.PROMPT_APPT_TIME)
+
+    parsed = _parse_appt_time(appt_time)
+    if parsed is None:
+        set_slot(intent, config.SLOT_APPT_TIME, None)
+        attrs.pop("pendingSuggestion", None)
+        return elicit(event, config.SLOT_APPT_TIME, config.PROMPT_APPT_TIME_INVALID)
+
+    h, mi = parsed
+    if "apptRequested" not in attrs:
+        attrs["apptRequested"] = datetime(day.year, day.month, day.day, h, mi, tzinfo=tz).isoformat()
+    service = _google_calendar() if config.CALENDAR_ID else None
+    if service is None:
+        req = datetime(day.year, day.month, day.day, h, mi, tzinfo=tz)
+        attrs["apptStart"] = req.isoformat()
+        attrs["apptEnd"] = (req + timedelta(minutes=config.APPT_DURATION_MIN)).isoformat()
+        return delegate(event)
+    start, end, adjusted, checked = find_appt_slot(service, day, h, mi, tz)
+    if not checked or start is None:
+        if not checked:
+            req = datetime(day.year, day.month, day.day, h, mi, tzinfo=tz)
+            attrs["apptStart"] = req.isoformat()
+            attrs["apptEnd"] = (req + timedelta(minutes=config.APPT_DURATION_MIN)).isoformat()
+            return delegate(event)
+        return elicit(event, config.SLOT_APPT_TIME,
+            "I could not find any opening in the next 7 days. Please suggest a later date, or call us directly and we will arrange it.")
+    if not adjusted:
+        attrs["apptStart"] = start.isoformat()
+        attrs["apptEnd"] = end.isoformat()
+        attrs.pop("pendingSuggestion", None)
+        return delegate(event)
+    req_pretty = pretty_appt(datetime(day.year, day.month, day.day, h, mi, tzinfo=tz))
+    if "apptRequested" not in attrs:
+        attrs["apptRequested"] = datetime(day.year, day.month, day.day, h, mi, tzinfo=tz).isoformat()
+    attrs["pendingSuggestion"] = start.isoformat()
+    return elicit(event, config.SLOT_APPT_TIME,
+        f"Sorry, {req_pretty} is not available. The next opening is {pretty_appt(start)}. Does that work for you? Say yes, or suggest another time.")

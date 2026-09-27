@@ -9,7 +9,7 @@
 #        - connect-caller-intake-saver (Lex fulfillment hook, S3 save)
 #      Creates execution roles if missing, sets timeout/env, grants lexv2.amazonaws.com invoke.
 #   3. Lex V2 — create (or reuse) bot `CallerInfoVoiceAgent`, locale en_US,
-#      intent `CollectCallerInfo` + 6 slots, build locale, publish version,
+#      intent `CollectCallerInfo` + 8 slots, build locale, publish version,
 #      create/update alias `Prod` wired to the dialog-hook Lambda.
 #
 # Connect contact flow + phone number remain manual (console) — the script
@@ -167,6 +167,13 @@ build_zips() {
   rm -rf "$deploy_dir"; mkdir -p "$deploy_dir"
   rm -f "$PROJECT_ROOT/lex-hook.zip" "$PROJECT_ROOT/s3-saver.zip"
 
+  # Vendor the Google Calendar client: the Lambda runtime never includes it,
+  # so always bundle it (local installs don't transfer).
+  log "vendoring google-api-python-client into lex-hook.zip"
+  python3 -m pip install --quiet --no-cache-dir --target "$deploy_dir" \
+    google-api-python-client \
+    || die "pip install failed — need python3 -m pip + network to vendor google-api-python-client"
+
   cp "$PROJECT_ROOT/config.py" "$deploy_dir/config.py"
   cp "$PROJECT_ROOT/lambda/lex_hook.py" "$deploy_dir/lambda_function.py"
   (cd "$deploy_dir" && zip -qr "$PROJECT_ROOT/lex-hook.zip" .) && ok "lex-hook.zip"
@@ -320,7 +327,8 @@ deploy_lambdas() {
     "NOTIFICATION_ENABLED=${NOTIFICATION_ENABLED:-false}" \
     "NOTIFICATION_EMAIL=${NOTIFICATION_EMAIL:-}" \
     "NOTIFICATION_CALLER_ENABLED=${NOTIFICATION_CALLER_ENABLED:-false}" \
-    "SES_SENDER_EMAIL=${SES_SENDER_EMAIL:-}"
+    "SES_SENDER_EMAIL=${SES_SENDER_EMAIL:-}" \
+    "CALENDAR_ID=${CALENDAR_ID:-}"
   deploy_lambda "$SAVER_FN" "$PROJECT_ROOT/s3-saver.zip" "$saver_arn" "S3_BUCKET=$BUCKET"
   # Functions created in the console use auto-generated roles, which the update
   # path never changes — so attach the S3 policy to each function's ACTUAL
@@ -441,7 +449,7 @@ deploy_lex() {
   local confirm_json closing_json
   confirm_json="$(mktemp)"; closing_json="$(mktemp)"
   cat >"$confirm_json" <<'EOF'
-{"active":true,"promptSpecification":{"messageGroups":[{"message":{"plainTextMessage":{"value":"So to confirm: first name {FirstName}, last name {LastName}, email {Email}, best callback number {CallbackNumber}, calling about {ReasonForCalling}. Is all of that correct? Say yes to confirm, or no to make changes."}}}],"maxRetries":2,"allowInterrupt":true},"declinationResponse":{"messageGroups":[{"message":{"plainTextMessage":{"value":"Okay, let us update your details."}}}],"allowInterrupt":true}}
+{"active":true,"promptSpecification":{"messageGroups":[{"message":{"plainTextMessage":{"value":"So to confirm: first name {FirstName}, last name {LastName}, email {Email}, best callback number {CallbackNumber}, calling about {ReasonForCalling}, on {AppointmentDate} at {AppointmentTime}. Is all of that correct? Say yes to confirm, or no to make changes."}}}],"maxRetries":2,"allowInterrupt":true},"declinationResponse":{"messageGroups":[{"message":{"plainTextMessage":{"value":"Okay, let us update your details."}}}],"allowInterrupt":true}}
 EOF
   cat >"$closing_json" <<'EOF'
 {"active":true,"closingResponse":{"messageGroups":[{"message":{"plainTextMessage":{"value":"Thank you. Someone from iFirm will reach out to you. Have a nice day."}}}],"allowInterrupt":true}}
@@ -451,7 +459,7 @@ EOF
     intent_id="$("${AWS[@]}" lexv2-models create-intent --intent-name CollectCallerInfo \
       --bot-id "$bot_id" --bot-version DRAFT --locale-id "$LOCALE" \
       --description "Collect caller name, email, callback number and reason" \
-      --sample-utterances utterance="I need help" utterance="Hi" utterance="Hello" utterance="Yes" utterance="Okay" utterance="Sure" utterance="Go ahead" 'utterance="That is fine"' 'utterance="My name is {FirstName} {LastName}"' 'utterance="My first name is {FirstName}"' \
+      --sample-utterances utterance="I need help" utterance="Hi" utterance="Hello" utterance="Yes" utterance="Okay" utterance="Sure" utterance="Go ahead" 'utterance="That is fine"' 'utterance="My name is {FirstName} {LastName}"' 'utterance="My first name is {FirstName}"' 'utterance="I would like to book an appointment"' \
       --dialog-code-hook enabled=true \
       --fulfillment-code-hook enabled=true \
       --intent-confirmation-setting "file://$confirm_json" \
@@ -462,7 +470,7 @@ EOF
     log "updating intent CollectCallerInfo ($intent_id)"
     "${AWS[@]}" lexv2-models update-intent --intent-id "$intent_id" --intent-name CollectCallerInfo \
       --bot-id "$bot_id" --bot-version DRAFT --locale-id "$LOCALE" \
-      --sample-utterances utterance="I need help" utterance="Hi" utterance="Hello" utterance="Yes" utterance="Okay" utterance="Sure" utterance="Go ahead" 'utterance="That is fine"' 'utterance="My name is {FirstName} {LastName}"' 'utterance="My first name is {FirstName}"' \
+      --sample-utterances utterance="I need help" utterance="Hi" utterance="Hello" utterance="Yes" utterance="Okay" utterance="Sure" utterance="Go ahead" 'utterance="That is fine"' 'utterance="My name is {FirstName} {LastName}"' 'utterance="My first name is {FirstName}"' 'utterance="I would like to book an appointment"' \
       --dialog-code-hook enabled=true \
       --fulfillment-code-hook enabled=true \
       --intent-confirmation-setting "file://$confirm_json" \
@@ -613,30 +621,35 @@ EOF
     'No problem. What is the best phone number, including the area code, to reach you at?')"
   SID_REASON="$(create_or_update_slot ReasonForCalling AMAZON.FreeFormInput Required \
     'Got it. Briefly, what is the reason for your call today?')"
+  SID_APPT_DATE="$(create_or_update_slot AppointmentDate AMAZON.Date Required \
+    'What day works for you? You can say something like this Friday, or September 30th.')"
+  SID_APPT_TIME="$(create_or_update_slot AppointmentTime AMAZON.Time Required \
+    'What time works for you on that day?')"
 
   # Fail fast with a clear message instead of a cryptic length error below.
-  for _s in "$SID_FIRST" "$SID_LAST" "$SID_EMAIL" "$SID_ISBEST" "$SID_CB" "$SID_REASON"; do
+  for _s in "$SID_FIRST" "$SID_LAST" "$SID_EMAIL" "$SID_ISBEST" "$SID_CB" "$SID_REASON" "$SID_APPT_DATE" "$SID_APPT_TIME"; do
     [[ -n "$_s" && "$_s" != "None" ]] \
       || die "a slot ID is missing — aborting before slot-priority update"
   done
 
   # Final intent write: FULL spec (utterances, hooks, confirmation, closing
-  # AND priorities 1→6). UpdateIntent has replacement semantics, so a
+  # AND priorities 1→8). UpdateIntent has replacement semantics, so a
   # priorities-only update would wipe the other settings and can break the
   # locale build — this single write leaves the intent complete.
   "${AWS[@]}" lexv2-models update-intent --intent-id "$intent_id" --intent-name CollectCallerInfo \
     --bot-id "$bot_id" --bot-version DRAFT --locale-id "$LOCALE" \
-    --description "Collect caller name, email, callback number and reason" \
-    --sample-utterances utterance="I need help" utterance="Hi" utterance="Hello" utterance="Yes" utterance="Okay" utterance="Sure" utterance="Go ahead" 'utterance="That is fine"' 'utterance="My name is {FirstName} {LastName}"' 'utterance="My first name is {FirstName}"' \
+    --description "Collect caller name, email, callback number, reason and appointment" \
+    --sample-utterances utterance="I need help" utterance="Hi" utterance="Hello" utterance="Yes" utterance="Okay" utterance="Sure" utterance="Go ahead" 'utterance="That is fine"' 'utterance="My name is {FirstName} {LastName}"' 'utterance="My first name is {FirstName}"' 'utterance="I would like to book an appointment"' \
     --dialog-code-hook enabled=true \
     --fulfillment-code-hook enabled=true \
     --intent-confirmation-setting "file://$confirm_json" \
     --intent-closing-setting "file://$closing_json" \
     --slot-priorities priority=1,slotId="$SID_FIRST" priority=2,slotId="$SID_LAST" \
       priority=3,slotId="$SID_EMAIL" priority=4,slotId="$SID_ISBEST" \
-      priority=5,slotId="$SID_CB" priority=6,slotId="$SID_REASON" >/dev/null \
+      priority=5,slotId="$SID_CB" priority=6,slotId="$SID_REASON" \
+      priority=7,slotId="$SID_APPT_DATE" priority=8,slotId="$SID_APPT_TIME" >/dev/null \
     || die "could not finalize intent CollectCallerInfo — see AWS error above"
-  ok "intent finalized (hooks, confirmation, slot priorities 1-6)"
+  ok "intent finalized (hooks, confirmation, slot priorities 1-8)"
   rm -f "$confirm_json" "$closing_json"
 
   # — Build locale (one automatic retry: a fresh slot type can need time to propagate) —

@@ -28,7 +28,7 @@ updated, not duplicated.
 |------|-----------|---------|
 | 1/3 S3 | `s3://connect-caller-intake-<ACCOUNT_ID>` | Create if missing (with correct `LocationConstraint`); then enforce block-public-access, versioning, SSE-S3 (`AES256`). |
 | 2/3 Lambda | `connect-voice-agent-hook`, `connect-caller-intake-saver` | Build `lex-hook.zip` / `s3-saver.zip` from `lambda/*.py` + `config.py`; create roles `connect-voice-agent-hook-role` / `connect-caller-intake-saver-role` (with `AWSLambdaBasicExecutionRole` + inline `s3:PutObject/GetObject/ListBucket` on both — the hook saves records on fulfillment); create or update functions (Python 3.12, x86_64, timeout 15s, env `S3_BUCKET` — `AWS_REGION` is **not** set because Lambda reserves that key; the runtime provides it automatically); grant `lexv2.amazonaws.com` invoke on both. IAM calls use retry-with-backoff for eventual consistency. |
-| 3/3 Lex V2 | Bot `CallerInfoVoiceAgent`, alias `Prod`, locale `en_US` | Create role `LexV2CallerIntakeRole` (Polly read + CloudWatch logs); create/reuse bot; create/reuse locale (NLU 0.40, voice Joanna/neural or `POLLY_*` env); create/update intent `CollectCallerInfo` (utterances, dialog + fulfillment hooks enabled, confirmation + closing prompts); custom slot type `YesNoValues` (Lex V2 has no `AMAZON.YesNo` built-in) + 6 slots with priorities 1–6; `build-bot-locale` (waits for `Built`); publish version; create/update alias `Prod` wired to the dialog-hook Lambda. |
+| 3/3 Lex V2 | Bot `CallerInfoVoiceAgent`, alias `Prod`, locale `en_US` | Create role `LexV2CallerIntakeRole` (Polly read + CloudWatch logs); create/reuse bot; create/reuse locale (NLU 0.40, voice Joanna/neural or `POLLY_*` env); create/update intent `CollectCallerInfo` (utterances, dialog + fulfillment hooks enabled, confirmation + closing prompts); custom slot type `YesNoValues` (Lex V2 has no `AMAZON.YesNo` built-in) + 8 slots (contact + `AppointmentDate/Time`) with priorities 1–8; `build-bot-locale` (waits for `Built`); publish version; create/update alias `Prod` wired to the dialog-hook Lambda. |
 
 The script prints at the end:
 
@@ -100,6 +100,10 @@ All defaults mirror `config.py`. You can override with env vars or flags:
 | Admin recipients | `NOTIFICATION_EMAIL` | — | _(empty; comma-separated)_ |
 | Caller receipt | `NOTIFICATION_CALLER_ENABLED` | — | `false` (callers never emailed unless `true`) |
 | Email sender (verified) | `SES_SENDER_EMAIL` | — | _(empty = notifications skipped)_ |
+| Booking calendar | `CALENDAR_ID` | — | _(empty = date/time collected, booking `unchecked`)_ |
+| Booking timezone | `TIMEZONE` | — | `America/Toronto` |
+| Slot length (min) | `APPOINTMENT_DURATION_MIN` | — | `30` |
+| Booking window (days) | `APPOINTMENT_LOOKAHEAD_DAYS` | — | `60` |
 | AWS profile | — | `--profile` | default profile |
 
 Examples:

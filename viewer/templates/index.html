@@ -60,6 +60,7 @@
                     <th>Email</th>
                     <th>Callback #</th>
                     <th>Reason</th>
+                    <th>Appointment</th>
                     <th>Actions</th>
                 </tr>
             </thead>
@@ -72,6 +73,7 @@
                     <td>{{ r.email or '-' }}</td>
                     <td>{{ r.callbackNumber or '-' }}</td>
                     <td>{{ (r.reasonForCalling[:60] ~ '...') if r.reasonForCalling and r.reasonForCalling|length > 60 else (r.reasonForCalling or '-') }}</td>
+                    <td>{{ r.appointmentStart or '-' }}{% if r.appointmentStatus and r.appointmentStatus not in ['booked'] %} ({{ r.appointmentStatus }}){% endif %}</td>
                     <td>
                         <a href="/record/{{ r._s3_key }}" class="btn btn-secondary" style="padding:6px 12px;font-size:12px;">View</a>
                         <a href="/download/{{ r._s3_key }}" class="btn btn-secondary" style="padding:6px 12px;font-size:12px;">Download</a>

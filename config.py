@@ -49,6 +49,8 @@ SLOT_EMAIL           = "Email"
 SLOT_IS_BEST_NUMBER  = "IsBestNumber"
 SLOT_CALLBACK_NUMBER = "CallbackNumber"
 SLOT_REASON          = "ReasonForCalling"
+SLOT_APPT_DATE       = "AppointmentDate"
+SLOT_APPT_TIME       = "AppointmentTime"
 
 # ─── Validation ───────────────────────────────────────────────────────
 EMAIL_PATTERN    = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
@@ -64,6 +66,23 @@ PHONE_DIGITS_10  = 10
 PHONE_DIGITS_11  = 11
 YES_ANSWERS      = ("yes", "y", "yeah", "yep")
 NO_ANSWERS       = ("no", "n", "nope")
+# Extra affirmations accepted when offering a suggested appointment slot.
+APPT_ACCEPT_EXTRA = ("okay", "ok", "sure", "sounds good", "that works", "perfect", "great", "fine")
+
+# ─── Appointment booking (Google Calendar) ──────────────────────────
+# The service account JSON key lives in S3 (same records bucket, never public).
+# Share the target calendar with the service account email first ("Make changes
+# to events"), then set CALENDAR_ID to that calendar's ID (usually its email).
+TIMEZONE                 = os.environ.get("TIMEZONE", "America/Toronto")
+CALENDAR_ID              = os.environ.get("CALENDAR_ID", "")
+GOOGLE_CREDENTIALS_KEY   = os.environ.get("GOOGLE_CREDENTIALS_KEY", "config/google-credentials.json")
+APPT_DURATION_MIN        = int(os.environ.get("APPOINTMENT_DURATION_MIN", 30))
+APPT_LOOKAHEAD_DAYS      = int(os.environ.get("APPOINTMENT_LOOKAHEAD_DAYS", 60))
+APPT_SEARCH_DAYS         = 7            # how far ahead suggestions may reach
+APPT_STEP_MIN            = 15           # suggestion granularity (minutes)
+BUSINESS_HOURS_START     = 9            # 9 AM Toronto, Mon–Fri
+BUSINESS_HOURS_END       = 17           # 5 PM Toronto (last slot must END by this)
+VAGUE_TIMES              = ("MO", "AF", "EV", "NI")  # Lex codes needing a specific time
 
 # ─── Prompts ──────────────────────────────────────────────────────────
 PROMPT_WELCOME          = "Welcome. Thank you for calling. I am your virtual assistant. Help me with some basic information to get started."
@@ -80,6 +99,10 @@ PROMPT_INVALID_NAME     = "Please share only your name, not your SIN number. Wha
 PROMPT_INVALID_LAST     = "Please share only your last name as on your SIN card. What is your last name?"
 PROMPT_INVALID_EMAIL    = "That email looks invalid. Please spell your email slowly."
 PROMPT_MIN_REASON       = "Briefly tell me the reason for your call?"
+PROMPT_APPT_DATE        = "What day works for you? You can say something like this Friday, or September 30th."
+PROMPT_APPT_DATE_INVALID = "Could you give me a specific day, like September 30th? I can book up to 60 days out."
+PROMPT_APPT_TIME        = "What time works for you on that day?"
+PROMPT_APPT_TIME_INVALID = "Could you give me a specific time, like 2 30 PM?"
 PROMPT_CLOSING          = "Thank you. Someone from iFirm will reach out to you. Have a nice day."
 PROMPT_ERROR            = "Sorry, we had trouble. Goodbye."
 

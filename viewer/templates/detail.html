@@ -71,6 +71,14 @@
                     <div class="field-value">{{ record.reasonForCalling }}</div>
                 </div>
                 <div class="field">
+                    <div class="field-label">Appointment (Toronto)</div>
+                    <div class="field-value">{{ record.appointmentStart or '-' }}{% if record.appointmentEnd %} – {{ record.appointmentEnd }}{% endif %}</div>
+                </div>
+                <div class="field">
+                    <div class="field-label">Appointment Status</div>
+                    <div class="field-value">{{ record.appointmentStatus or '-' }}{% if record.calendarEventLink %} (<a href="{{ record.calendarEventLink }}" target="_blank" rel="noopener">calendar event</a>){% endif %}</div>
+                </div>
+                <div class="field">
                     <div class="field-label">Record ID</div>
                     <div class="field-value"><span style="font-family:monospace;background:#f0f0f0;padding:2px 8px;border-radius:4px;">{{ record.recordId }}</span></div>
                 </div>

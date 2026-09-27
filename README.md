@@ -448,7 +448,7 @@ Set slot priority order 1→8 in `Slot priority` panel.
 In the intent page, click `Confirmation`:
 
 - Enable confirmation: `ON`
-- Confirm prompt: `So to confirm: first name {FirstName}, last name {LastName}, email {Email}, best callback number {CallbackNumber}, calling about {ReasonForCalling}. Is all of that correct? Say yes to confirm, or no to make changes.`
+- Confirm prompt: `So to confirm: first name {FirstName}, last name {LastName}, email {Email}, best callback number {CallbackNumber}, calling about {ReasonForCalling}, on {AppointmentDate} at {AppointmentTime}. Is all of that correct? Say yes to confirm, or no to make changes.`
 - Yes = confirmed (saves + closes). No = denied (restarts at FirstName). Never phrase it negatively ("need any changes?") — a human "No" then means "all correct" but Lex reads it as denial.
 - Decline response: `Okay, let us update your details.`
 - Max retries: `2`
@@ -593,7 +593,7 @@ Rules of thumb:
 
 ## 8. Optional: Terraform (IaC) Equivalent
 
-Resources to create: `aws_lambda_function` (hook — validation + S3 save + SES email; saver retained as reference) + `aws_iam_role` (lex + lambda roles) + `aws_s3_bucket` + `aws_lexv2models_bot` + `aws_lexv2models_bot_locale` (voice `Tiffany`/`generative` by default) + `aws_lexv2models_intent` (`CollectCallerInfo` with `confirmation_setting`, `dialog_code_hook` + `fulfillment_code_hook` both invoking the hook Lambda — Lex allows one code hook per alias) + custom slot type `YesNoValues` + 6× `aws_lexv2models_slot` + `aws_lexv2models_bot_version` + `aws_lexv2models_bot_alias` (`Prod`) + `aws_connect_contact_flow` (import `contact-flow.json`). Always `Build` locale before versioning; alias must point at a numbered version, not `DRAFT`.
+Resources to create: `aws_lambda_function` (hook — validation + S3 save + SES email; saver retained as reference) + `aws_iam_role` (lex + lambda roles) + `aws_s3_bucket` + `aws_lexv2models_bot` + `aws_lexv2models_bot_locale` (voice `Tiffany`/`generative` by default) + `aws_lexv2models_intent` (`CollectCallerInfo` with `confirmation_setting`, `dialog_code_hook` + `fulfillment_code_hook` both invoking the hook Lambda — Lex allows one code hook per alias) + custom slot type `YesNoValues` + 8× `aws_lexv2models_slot` (contact + appointment) + `aws_lexv2models_bot_version` + `aws_lexv2models_bot_alias` (`Prod`) + `aws_connect_contact_flow` (import `contact-flow.json`). Always `Build` locale before versioning; alias must point at a numbered version, not `DRAFT`.
 
 ---
 

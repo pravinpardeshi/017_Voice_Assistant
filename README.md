@@ -434,12 +434,14 @@ In the intent page, click `Slots > Add slot`. Set `Prompt` exactly as below. Max
 | 4 | `IsBestNumber` | custom `YesNoValues` (enumeration: yes/no + synonyms — Lex V2 has **no** `AMAZON.YesNo` built-in) | Yes | `Thanks. Is the number you are calling from the best number to reach you? Just say yes or no.` (overridden at runtime by Lambda to include ANI) |
 | 5 | `CallbackNumber` | `AMAZON.PhoneNumber` | No (Optional — Lambda skips when Yes) | `No problem. What is the best phone number, including the area code, to reach you at?` |
 | 6 | `ReasonForCalling` | `AMAZON.FreeFormInput` | Yes | `Got it. Briefly, what is the reason for your call today?` |
+| 7 | `AppointmentDate` | `AMAZON.Date` | Yes | `What day works for you? You can say something like this Friday, or September 30th.` (past/vague dates re-asked; Mon–Fri only for booking) |
+| 8 | `AppointmentTime` | `AMAZON.Time` | Yes | `What time works for you on that day?` (vague answers re-asked; busy times get a spoken alternative — say Yes to take it) |
 
 > Note: these prompts are deployed automatically by `deploy.sh` — manual console edits get overwritten on the next `--only-lex` run.
 
 > Privacy: do NOT create a slot for SIN number. Only names.
 
-Set slot priority order 1→6 in `Slot priority` panel.
+Set slot priority order 1→8 in `Slot priority` panel.
 
 ### 4.3 Enable confirmation
 
@@ -549,11 +551,14 @@ Connect service role needs `lex:RecognizeText / RecognizeUtterance` on the bot a
 4. Bot: `I see you are calling from +1... Is this the best number to reach you? Say yes or no.` (ANI filled in at runtime)
    - Yes → skip. No → `No problem. What is the best phone number, including the area code, to reach you at?`
 5. Bot: `Got it. Briefly, what is the reason for your call today?`
-6. Bot: `So to confirm: first name ..., last name ..., email ..., best callback number ..., calling about .... Is all of that correct? Say yes to confirm, or no to make changes?`
-   - Yes → save + close. No → restart at 1.
-7. Bot: `Thank you. Someone from iFirm will reach out to you. Have a nice day.` → hang up.
+6. Bot: `What day works for you? You can say something like this Friday, or September 30th.`
+7. Bot: `What time works for you on that day?`
+   - Free → continue. Busy → `Sorry, <requested> is not available. The next opening is <suggestion>. Does that work for you? Say yes, or suggest another time.` → Yes books the suggestion.
+8. Bot: `So to confirm: first name ..., last name ..., email ..., best callback number ..., calling about ..., on ... at .... Is all of that correct? Say yes to confirm, or no to make changes?`
+   - Yes → book on Google Calendar + save + email + close. No → restart at 1.
+9. Bot: `Thank you. Someone from iFirm will reach out to you. Have a nice day.` → hang up.
 
-> Steps 0 use the flow's prompts (`contact-flow.json`); steps 1–7 use the Lex
+> Steps 0 use the flow's prompts (`contact-flow.json`); steps 1–9 use the Lex
 > slot/confirmation/closing prompts. If the caller answers the opener with
 > their name instead of Yes, the Lambda harvests it from the transcript and no
 > question repeats.
@@ -572,8 +577,10 @@ next `deploy.sh --only-lex` overwrites them — put lasting changes in the repo.
 | 4 | Best-number question | `lambda/lex_hook.py` (the `I see you are calling from …` f-string; ANI is runtime data) | `bash deploy.sh --only-lambdas` |
 | 4 | Alternate-number prompt; all re-prompts (bad name/email/phone/reason, decline restart) | `config.py` `PROMPT_*` values | `bash deploy.sh --only-lambdas` (`config.py` ships inside the zip) |
 | 5 | Reason prompt | `deploy.sh` → `ReasonForCalling` prompt string | `bash deploy.sh --only-lex` |
-| 6 | Confirmation + decline response | `deploy.sh` → `confirm_json` / decline text | `bash deploy.sh --only-lex` |
-| 7 | Closing line | `config.py` `PROMPT_CLOSING` (Lambda fulfillment message) **and** `deploy.sh` `closing_json` (intent closing response) — keep them identical | `--only-lambdas` for the former, `--only-lex` for the latter (or full `bash deploy.sh`) |
+| 6 | Appointment day/time prompts + re-prompts | `config.py` `PROMPT_APPT_*` values | `bash deploy.sh --only-lambdas` (`config.py` ships inside the zip) |
+| 7 | Confirmation + decline response | `deploy.sh` → `confirm_json` / decline text | `bash deploy.sh --only-lex` |
+| 8 | Closing line | `config.py` `PROMPT_CLOSING` (Lambda fulfillment message) **and** `deploy.sh` `closing_json` (intent closing response) — keep them identical | `--only-lambdas` for the former, `--only-lex` for the latter (or full `bash deploy.sh`) |
+| 9 | Business hours, slot length, calendar, timezone | `config.py` (`BUSINESS_HOURS_*`, `APPT_DURATION_MIN`, `CALENDAR_ID`, `TIMEZONE`) — `CALENDAR_ID` also as deploy env | `bash deploy.sh --only-lambdas` |
 
 Rules of thumb:
 
@@ -821,3 +828,52 @@ record are unaffected.
 3. **Verify**: test-call through Yes → S3 file appears → caller receipt +
    admin email arrive with all details in the body. If not, check hook CloudWatch
    logs for `Sent caller receipt` / `Sent intake email` vs `WARNING`.
+
+---
+
+## 14. Appointment booking (Google Calendar)
+
+After contact details + reason, the bot asks for a preferred day and time,
+checks a Google Calendar, and books on confirmation:
+
+- **Day** (`AppointmentDate`, `AMAZON.Date`): specific dates within 60 days
+  (`APPT_LOOKAHEAD_DAYS`); past/vague answers are re-asked.
+- **Time** (`AppointmentTime`, `AMAZON.Time`): specific times (`MO/AF/EV/NI`
+  answers are re-asked for a specific time).
+- **Availability**: requested slot must be free and inside business hours
+  (Mon–Fri 9:00–17:00 Toronto, `BUSINESS_HOURS_*`, 30-min `APPT_DURATION_MIN`).
+  Busy times get a spoken next-opening offer — the caller says Yes to take it.
+- **Confirmation** includes the appointment; on Yes the Lambda re-checks,
+  inserts the Calendar event, saves the record (`appointmentStart/End/Status`,
+  `calendarEventId`), then emails. Statuses: `booked`, `adjusted` (took the
+  suggestion), `unchecked` (calendar unreachable/misconfigured — still saves),
+  `booking_failed` (saved + flagged for manual follow-up), `no_availability`.
+- **Timezone**: `America/Toronto` (`TIMEZONE`).
+- The viewer lists appointments and links the Calendar event; search covers
+  appointment fields automatically.
+
+### 14.1 Google Calendar setup (console + CLI, one time)
+
+1. **Google Cloud**: create/select a project → IAM → Service Accounts → create
+   one (e.g. `ifirm-intake-booker`) → **Keys → Add key → JSON** → download.
+   **Never commit this file** (it's git-ignored).
+2. **Share the calendar**: in Google Calendar, share the target calendar with
+   the service-account email → **Make changes to events**. Note the calendar ID
+   (usually the calendar's email address).
+3. **Upload the key to S3** (same private records bucket):
+   ```bash
+   aws s3 cp ~/Downloads/ifirm-intake-booker-*.json \
+     s3://connect-caller-intake-<ACCOUNT-ID>/config/google-credentials.json \
+     --region ca-central-1
+   ```
+4. **Deploy with the calendar ID**:
+   ```bash
+   export CALENDAR_ID="your-calendar-id@group.calendar.google.com"
+   bash deploy.sh --only-lambdas   # env + google client vendored into the zip
+   bash deploy.sh --only-lex       # 2 new slots, priorities, confirmation text
+   ```
+   Without `CALENDAR_ID`, dialog still collects date/time but booking stays
+   `unchecked` (nothing breaks).
+5. **Verify**: Lex console test → pick a free time → confirm Yes → event appears
+   on the calendar + S3 record shows `"appointmentStatus": "booked"`. Then test
+   a busy time → expect the spoken alternative → Yes → `adjusted`.

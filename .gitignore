@@ -24,6 +24,10 @@ s3-saver.zip
 credentials
 *_credentials*
 
+# Service-account keys must never be committed (upload to S3 instead — README §14)
+*service-account*.json
+*google-credentials*.json
+
 # OS / editor clutter
 .DS_Store
 Thumbs.db
